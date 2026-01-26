@@ -1,48 +1,36 @@
+// server_gamehub.js
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
-import { initializeApp } from "firebase/app";
-import { getFirestore, collection, addDoc, doc, setDoc, serverTimestamp } from "firebase/firestore";
 
 const app = express();
 app.use(express.json());
 
-// ✅ Activer CORS pour GameHub
+// Activer CORS pour votre frontend
 app.use(cors({
-  origin: ["https://gamehub-56km.onrender.com"],
+  origin: ["https://gamehub-56km.onrender.com", "http://localhost:3000"],
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-// 🔑 Clé secrète Paystack (mode test)
+// Clé secrète Paystack
 const PAYSTACK_SECRET_KEY = "sk_test_04aeff0b10d204734f7eab1fdb6b0234b23aa407";
 
-// Configuration Firebase
-const firebaseConfig = {
-  apiKey: "AIzaSyDhySV3lXOlCQ8fMIYRlzs0YpMg6MZ_Ixo",
-  authDomain: "gamehub-e45ea.firebaseapp.com",
-  projectId: "gamehub-e45ea",
-  storageBucket: "gamehub-e45ea.firebasestorage.app",
-  messagingSenderId: "609288909968",
-  appId: "1:609288909968:web:45f3716ce6b2d4970d1415"
-};
-
-// Initialiser Firebase
-const firebaseApp = initializeApp(firebaseConfig);
-const db = getFirestore(firebaseApp);
-
-// ✅ Route test
+// Route test
 app.get("/", (req, res) => {
-  res.send("✅ Backend Paystack GameHub opérationnel !");
+  res.json({ 
+    status: "success", 
+    message: "✅ Backend GameHub opérationnel !" 
+  });
 });
 
 // 1. Initialiser un paiement avec callback_url dynamique
 app.post("/create-payment", async (req, res) => {
-  const { email, amount, gameId, gameName, plan, userId } = req.body;
+  const { email, amount, sourcePage, gameId, gameName, plan } = req.body;
 
   try {
     // Construire l'URL de callback dynamique
-    const callbackUrl = `https://gamehub-56km.onrender.com/accueil.html?paid=true&gameId=${gameId}`;
+    const callbackUrl = `https://gamehub-56km.onrender.com/${sourcePage}.html?payment_ref=true`;
 
     const response = await fetch("https://api.paystack.co/transaction/initialize", {
       method: "POST",
@@ -52,27 +40,47 @@ app.post("/create-payment", async (req, res) => {
       },
       body: JSON.stringify({
         email,
-        amount: amount * 100, // montant en Kobo
+        amount: amount * 100, // montant en centimes (pour XOF)
         currency: "XOF",
         callback_url: callbackUrl,
         metadata: {
           gameId,
           gameName,
           plan,
-          userId
+          sourcePage
         }
       }),
     });
 
     const data = await response.json();
-    res.json(data);
+    
+    if (!data.status) {
+      return res.status(400).json({
+        status: false,
+        message: data.message || "Erreur lors de l'initialisation du paiement"
+      });
+    }
+
+    res.json({
+      status: true,
+      message: "Paiement initialisé avec succès",
+      data: {
+        authorization_url: data.data.authorization_url,
+        access_code: data.data.access_code,
+        reference: data.data.reference
+      }
+    });
   } catch (err) {
     console.error("❌ Erreur create-payment:", err);
-    res.status(500).json({ error: "Erreur interne du serveur" });
+    res.status(500).json({ 
+      status: false, 
+      error: "Erreur interne du serveur",
+      details: err.message 
+    });
   }
 });
 
-// 2. Vérifier un paiement et enregistrer dans Firestore si succès
+// 2. Vérifier un paiement
 app.get("/verify-payment/:reference", async (req, res) => {
   const { reference } = req.params;
 
@@ -86,109 +94,106 @@ app.get("/verify-payment/:reference", async (req, res) => {
     const data = await response.json();
     
     if (data.status && data.data.status === "success") {
-      // Récupérer les métadonnées
-      const metadata = data.data.metadata;
-      const { gameId, gameName, plan, userId } = metadata;
-      
-      // Calculer la date d'expiration
-      const purchaseDate = new Date();
-      let expirationDate = new Date();
-      
-      switch(plan) {
-        case 'trial':
-          expirationDate = new Date(purchaseDate.getTime() + (1 * 60 * 60 * 1000)); // 1 heure
-          break;
-        case 'daily':
-          expirationDate = new Date(purchaseDate.getTime() + (24 * 60 * 60 * 1000)); // 24 heures
-          break;
-        case 'weekly':
-          expirationDate = new Date(purchaseDate.getTime() + (7 * 24 * 60 * 60 * 1000)); // 7 jours
-          break;
-        case 'monthly':
-          expirationDate = new Date(purchaseDate.getTime() + (30 * 24 * 60 * 60 * 1000)); // 30 jours
-          break;
-        default:
-          expirationDate = new Date(purchaseDate.getTime() + (24 * 60 * 60 * 1000)); // 24h par défaut
-      }
-      
-      // Enregistrer l'achat dans Firestore SEULEMENT si le paiement est réussi
-      try {
-        // Enregistrer dans la collection 'purchases'
-        const purchaseData = {
-          userId: userId,
-          gameId: gameId,
-          gameName: gameName,
-          plan: plan,
-          price: data.data.amount / 100, // Convertir de Kobo à XOF
-          purchaseDate: purchaseDate.toISOString(),
-          expirationDate: expirationDate.toISOString(),
-          status: 'active',
-          paystackReference: reference,
-          transactionId: data.data.id,
-          verified: true
-        };
-        
-        const purchaseRef = await addDoc(collection(db, 'purchases'), purchaseData);
-        
-        // Ajouter aussi dans la sous-collection de l'utilisateur
-        if (userId) {
-          const userPurchaseRef = collection(db, 'users', userId, 'purchases');
-          await addDoc(userPurchaseRef, {
-            ...purchaseData,
-            purchaseId: purchaseRef.id
-          });
-          
-          console.log(`✅ Achat enregistré pour l'utilisateur ${userId}, jeu: ${gameName}`);
+      res.json({
+        status: "success",
+        message: "Paiement vérifié avec succès",
+        data: {
+          amount: data.data.amount / 100,
+          currency: data.data.currency,
+          paid_at: data.data.paid_at,
+          reference: data.data.reference,
+          metadata: data.data.metadata
         }
-        
-        res.json({
-          status: 'success',
-          message: 'Paiement vérifié et achat enregistré',
-          data: {
-            purchaseId: purchaseRef.id,
-            gameId,
-            gameName,
-            expirationDate: expirationDate.toISOString()
-          }
-        });
-        
-      } catch (firestoreError) {
-        console.error("❌ Erreur Firestore:", firestoreError);
-        res.status(500).json({ 
-          status: 'error', 
-          message: 'Paiement réussi mais erreur lors de l\'enregistrement' 
-        });
-      }
-      
+      });
     } else {
       res.json({
-        status: data.data?.status || 'failed',
-        message: data.message || 'Paiement non confirmé'
+        status: data.data?.status || "failed",
+        message: data.message || "Paiement non vérifié"
       });
     }
   } catch (err) {
     console.error("❌ Erreur verify-payment:", err);
-    res.status(500).json({ error: "Erreur interne du serveur" });
+    res.status(500).json({ 
+      status: "error", 
+      error: "Erreur interne du serveur" 
+    });
   }
 });
 
-// 3. Webhook Paystack pour les mises à jour en temps réel
-app.post("/webhook/paystack", async (req, res) => {
+// 3. Webhook Paystack pour les notifications
+app.post("/webhook/paystack", express.json(), async (req, res) => {
   const event = req.body;
   
-  if (event.event === "charge.success") {
-    const data = event.data;
-    console.log("✅ Webhook: Paiement réussi:", data.reference);
+  // Vérifier la signature du webhook (recommandé pour la production)
+  const hash = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
     
-    // Ici vous pouvez ajouter une logique supplémentaire
-    // comme envoyer un email de confirmation
+  if (hash !== req.headers['x-paystack-signature']) {
+    return res.status(400).send('Signature invalide');
   }
-  
+
+  console.log("📩 Webhook Paystack reçu :", event.event);
+
+  if (event.event === "charge.success") {
+    const paymentData = event.data;
+    console.log("✅ Paiement réussi :", {
+      reference: paymentData.reference,
+      amount: paymentData.amount / 100,
+      email: paymentData.customer.email,
+      metadata: paymentData.metadata
+    });
+
+    // Ici, vous pourriez mettre à jour votre base de données Firebase
+    // pour marquer l'achat comme payé
+  }
+
   res.sendStatus(200);
 });
 
-// 🚀 Lancer serveur
-const PORT = process.env.PORT || 3001; // Port différent de l'app principale
+// 4. Route pour vérifier si un paiement a été effectué récemment
+app.get("/check-recent-payment/:reference", async (req, res) => {
+  const { reference } = req.params;
+  
+  try {
+    // Vérifier le paiement
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+      },
+    });
+
+    const data = await response.json();
+    
+    if (data.status && data.data.status === "success") {
+      res.json({
+        status: "success",
+        paid: true,
+        data: {
+          amount: data.data.amount / 100,
+          reference: data.data.reference,
+          metadata: data.data.metadata
+        }
+      });
+    } else {
+      res.json({
+        status: "pending",
+        paid: false,
+        message: data.message || "Paiement en attente"
+      });
+    }
+  } catch (err) {
+    res.json({
+      status: "error",
+      paid: false,
+      error: err.message
+    });
+  }
+});
+
+// Lancer le serveur
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Serveur Paystack GameHub lancé sur le port ${PORT}`);
+  console.log(`🚀 Backend GameHub lancé sur le port ${PORT}`);
+  console.log(`🔗 URL: https://backend-gamehub-eynr.onrender.com`);
 });

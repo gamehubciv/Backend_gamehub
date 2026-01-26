@@ -1,15 +1,19 @@
 {
-  "name": "gamehub-paystack-backend",
+  "name": "backend-gamehub",
   "version": "1.0.0",
-  "main": "server.js",
+  "description": "Backend pour la plateforme GameHub avec paiement Paystack",
+  "main": "server_gamehub.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server_gamehub.js",
+    "dev": "nodemon server_gamehub.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "node-fetch": "^3.3.2",
-    "cors": "^2.8.5",
-    "firebase": "^10.7.1"
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
