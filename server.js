@@ -1,344 +1,291 @@
-// server_gamehub.js - VERSION AVEC FIREBASE ADMIN
+// server.js - BACKEND GAMEHUB FINAL (RENDER + FIREBASE ADMIN + PAYSTACK)
+
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 import admin from "firebase-admin";
-import crypto from "crypto"; // Pour les webhooks Paystack
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
-// Activer CORS pour votre frontend
+// ===============================
+// CORS
+// ===============================
 app.use(cors({
-  origin: ["https://gamehub-56km.onrender.com", "http://localhost:3000"],
+  origin: [
+    "https://gamehub-56km.onrender.com",
+    "http://localhost:3000"
+  ],
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-// Initialiser Firebase Admin
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
+// ===============================
+// FIREBASE ADMIN (CORRECTION CLÉ PEM)
+// ===============================
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+  throw new Error("❌ FIREBASE_SERVICE_ACCOUNT manquant dans les variables d'environnement");
+}
+
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+// 🔥 CORRECTION CRITIQUE POUR RENDER
+serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 
 const db = admin.firestore();
+console.log("🔥 Firebase Admin initialisé");
 
-// Clé secrète Paystack
+// ===============================
+// PAYSTACK (clé laissée telle quelle)
+// ===============================
 const PAYSTACK_SECRET_KEY = "sk_test_04aeff0b10d204734f7eab1fdb6b0234b23aa407";
 
-// Route test
+// ===============================
+// ROUTE TEST
+// ===============================
 app.get("/", (req, res) => {
-  res.json({ 
-    status: "success", 
-    message: "✅ Backend GameHub opérationnel avec Firebase Admin !" 
+  res.json({
+    status: "success",
+    message: "✅ Backend GameHub opérationnel (Render + Firebase Admin + Paystack)"
   });
 });
 
-// 1. Initialiser un paiement avec callback_url dynamique
+// ===============================
+// 1. INITIALISER UN PAIEMENT
+// ===============================
 app.post("/create-payment", async (req, res) => {
   const { email, amount, sourcePage, gameId, gameName, plan, userId } = req.body;
 
   try {
-    // Construire l'URL de callback dynamique
     const callbackUrl = `https://gamehub-56km.onrender.com/${sourcePage}.html?payment_ref=true`;
 
     const response = await fetch("https://api.paystack.co/transaction/initialize", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         email,
-        amount: amount * 100, // montant en centimes (pour XOF)
+        amount: amount * 100,
         currency: "XOF",
         callback_url: callbackUrl,
         metadata: {
-          userId, // IMPORTANT: Inclure l'UID Firebase
+          userId,
           gameId,
           gameName,
           plan,
           sourcePage,
-          amount: amount
+          amount
         }
-      }),
+      })
     });
 
     const data = await response.json();
-    
+
     if (!data.status) {
       return res.status(400).json({
         status: false,
-        message: data.message || "Erreur lors de l'initialisation du paiement"
+        message: data.message || "Erreur Paystack"
       });
     }
 
     res.json({
       status: true,
-      message: "Paiement initialisé avec succès",
-      data: {
-        authorization_url: data.data.authorization_url,
-        access_code: data.data.access_code,
-        reference: data.data.reference
-      }
+      authorization_url: data.data.authorization_url,
+      access_code: data.data.access_code,
+      reference: data.data.reference
     });
-  } catch (err) {
-    console.error("❌ Erreur create-payment:", err);
-    res.status(500).json({ 
-      status: false, 
-      error: "Erreur interne du serveur",
-      details: err.message 
-    });
+
+  } catch (error) {
+    console.error("❌ create-payment:", error);
+    res.status(500).json({ status: false, error: "Erreur serveur" });
   }
 });
 
-// 2. Vérifier un paiement et enregistrer dans Firebase
+// ===============================
+// 2. VERIFIER UN PAIEMENT
+// ===============================
 app.get("/verify-payment/:reference", async (req, res) => {
   const { reference } = req.params;
 
   try {
-    const response = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
-      headers: {
-        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-      },
-    });
+    const response = await fetch(
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
+    );
 
     const data = await response.json();
-    
+
     if (data.status && data.data.status === "success") {
-      const paymentData = data.data;
-      const metadata = paymentData.metadata;
-      
-      // Enregistrer l'achat dans Firebase
-      const purchaseRecorded = await recordPurchaseInFirebase(
-        metadata.userId,
-        metadata.gameId,
-        metadata.gameName,
-        metadata.plan,
-        metadata.amount,
-        reference,
-        paymentData.customer.email
+      const p = data.data;
+      const m = p.metadata;
+
+      await recordPurchaseInFirebase(
+        m.userId,
+        m.gameId,
+        m.gameName,
+        m.plan,
+        m.amount,
+        p.reference,
+        p.customer.email
       );
 
-      res.json({
-        status: "success",
-        message: "Paiement vérifié et achat enregistré",
-        purchaseRecorded: purchaseRecorded,
-        data: {
-          amount: paymentData.amount / 100,
-          currency: paymentData.currency,
-          paid_at: paymentData.paid_at,
-          reference: paymentData.reference,
-          metadata: metadata
-        }
-      });
+      res.json({ status: "success", reference: p.reference });
     } else {
-      res.json({
-        status: data.data?.status || "failed",
-        message: data.message || "Paiement non vérifié"
-      });
+      res.json({ status: "failed", message: data.message });
     }
-  } catch (err) {
-    console.error("❌ Erreur verify-payment:", err);
-    res.status(500).json({ 
-      status: "error", 
-      error: "Erreur interne du serveur" 
-    });
+
+  } catch (error) {
+    console.error("❌ verify-payment:", error);
+    res.status(500).json({ status: "error" });
   }
 });
 
-// Fonction pour enregistrer un achat dans Firebase
-async function recordPurchaseInFirebase(userId, gameId, gameName, plan, price, reference, userEmail) {
-  try {
-    // Vérifier si l'achat existe déjà
-    const purchaseQuery = await db.collection('purchases')
-      .where('paystackReference', '==', reference)
-      .limit(1)
-      .get();
-    
-    if (!purchaseQuery.empty) {
-      console.log(`Achat déjà enregistré pour la référence: ${reference}`);
-      return true;
-    }
+// ===============================
+// ENREGISTRER UN ACHAT
+// ===============================
+async function recordPurchaseInFirebase(
+  userId,
+  gameId,
+  gameName,
+  plan,
+  price,
+  reference,
+  userEmail
+) {
+  const existing = await db.collection("purchases")
+    .where("paystackReference", "==", reference)
+    .limit(1)
+    .get();
 
-    // Calculer la date d'expiration
-    const purchaseDate = new Date();
-    let expirationDate = new Date();
-    
-    switch(plan) {
-      case 'trial':
-        expirationDate = new Date(purchaseDate.getTime() + (1 * 60 * 60 * 1000)); // 1 heure
-        break;
-      case 'daily':
-        expirationDate = new Date(purchaseDate.getTime() + (24 * 60 * 60 * 1000)); // 24 heures
-        break;
-      case 'weekly':
-        expirationDate = new Date(purchaseDate.getTime() + (7 * 24 * 60 * 60 * 1000)); // 7 jours
-        break;
-      case 'monthly':
-        expirationDate = new Date(purchaseDate.getTime() + (30 * 24 * 60 * 60 * 1000)); // 30 jours
-        break;
-      default:
-        expirationDate = new Date(purchaseDate.getTime() + (24 * 60 * 60 * 1000)); // 24h par défaut
-    }
+  if (!existing.empty) return true;
 
-    // Récupérer les données utilisateur pour le parrainage
-    let referredBy = null;
-    try {
-      const userDoc = await db.collection('users').doc(userId).get();
-      if (userDoc.exists) {
-        referredBy = userDoc.data().referredBy;
-      }
-    } catch (error) {
-      console.error("Erreur récupération données utilisateur:", error);
-    }
+  const now = new Date();
+  let expiration = new Date(now);
 
-    // Données de l'achat
-    const purchaseData = {
-      userId: userId,
-      userEmail: userEmail,
-      gameId: gameId,
-      gameName: gameName,
-      plan: plan,
-      price: parseFloat(price),
-      purchaseDate: purchaseDate.toISOString(),
-      expirationDate: expirationDate.toISOString(),
-      referredBy: referredBy,
-      paystackReference: reference,
-      commission: parseFloat(price) * 0.3, // 30% de commission
-      status: 'active',
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-
-    // 1. Enregistrer dans la collection 'purchases' principale
-    await db.collection('purchases').add(purchaseData);
-
-    // 2. Enregistrer dans la sous-collection de l'utilisateur
-    const userPurchaseData = {
-      ...purchaseData,
-      purchaseId: reference,
-      type: ['1xbet', 'betwinner', 'betclic', 'betmomo'].includes(gameId) ? 'bookmaker' : 'game'
-    };
-    
-    await db.collection('users').doc(userId).collection('purchases').add(userPurchaseData);
-
-    // 3. Mettre à jour les statistiques de l'utilisateur
-    await updateUserStats(userId, parseFloat(price));
-    
-    // 4. Gérer la commission de parrainage
-    if (referredBy) {
-      await handleReferralCommission(referredBy, userId, userEmail, gameName, parseFloat(price));
-    }
-
-    console.log(`✅ Achat enregistré pour ${userEmail}: ${gameName} (${plan})`);
-    return true;
-
-  } catch (error) {
-    console.error("❌ Erreur lors de l'enregistrement dans Firebase:", error);
-    return false;
+  switch (plan) {
+    case "trial": expiration.setHours(expiration.getHours() + 1); break;
+    case "daily": expiration.setDate(expiration.getDate() + 1); break;
+    case "weekly": expiration.setDate(expiration.getDate() + 7); break;
+    case "monthly": expiration.setDate(expiration.getDate() + 30); break;
+    default: expiration.setDate(expiration.getDate() + 1);
   }
+
+  let referredBy = null;
+  const userSnap = await db.collection("users").doc(userId).get();
+  if (userSnap.exists) referredBy = userSnap.data().referredBy || null;
+
+  const data = {
+    userId,
+    userEmail,
+    gameId,
+    gameName,
+    plan,
+    price: Number(price),
+    purchaseDate: now.toISOString(),
+    expirationDate: expiration.toISOString(),
+    referredBy,
+    paystackReference: reference,
+    commission: price * 0.3,
+    status: "active",
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  await db.collection("purchases").add(data);
+  await db.collection("users").doc(userId).collection("purchases").add(data);
+  await updateUserStats(userId, price);
+
+  if (referredBy) {
+    await handleReferralCommission(referredBy, userId, userEmail, gameName, price);
+  }
+
+  return true;
 }
 
-// Fonction pour mettre à jour les statistiques utilisateur
+// ===============================
+// STATS UTILISATEUR
+// ===============================
 async function updateUserStats(userId, amount) {
-  try {
-    const userRef = db.collection('users').doc(userId);
-    
-    // Mettre à jour les statistiques
-    await userRef.update({
-      totalPurchases: admin.firestore.FieldValue.increment(1),
-      totalSpent: admin.firestore.FieldValue.increment(amount),
-      lastPurchaseDate: admin.firestore.FieldValue.serverTimestamp()
-    });
-    
-    console.log(`📊 Stats mises à jour pour l'utilisateur ${userId}`);
-  } catch (error) {
-    console.error("Erreur mise à jour stats:", error);
-  }
+  await db.collection("users").doc(userId).update({
+    totalPurchases: admin.firestore.FieldValue.increment(1),
+    totalSpent: admin.firestore.FieldValue.increment(amount),
+    lastPurchaseDate: admin.firestore.FieldValue.serverTimestamp()
+  });
 }
 
-// Fonction pour gérer la commission de parrainage
-async function handleReferralCommission(referralCode, referredUserId, referredUserEmail, gameName, amount) {
-  try {
-    // Trouver l'utilisateur qui a parrainé
-    const referrerQuery = await db.collection('users')
-      .where('referralCode', '==', referralCode)
-      .limit(1)
-      .get();
-    
-    if (!referrerQuery.empty) {
-      const referrerDoc = referrerQuery.docs[0];
-      const referrerId = referrerDoc.id;
-      const referrerData = referrerDoc.data();
-      
-      const commission = amount * 0.3; // 30% de commission
-      
-      // Mettre à jour les gains du parrain
-      await db.collection('users').doc(referrerId).update({
-        totalEarnings: admin.firestore.FieldValue.increment(commission),
-        availableEarnings: admin.firestore.FieldValue.increment(commission),
-        totalReferrals: admin.firestore.FieldValue.increment(1)
-      });
-      
-      // Ajouter une notification pour le parrain
-      await db.collection('notifications').add({
-        userId: referrerId,
-        title: 'Nouvelle commission !',
-        message: `Votre filleul ${referredUserEmail} a acheté ${gameName}. Vous avez gagné ${commission.toFixed(2)}Fr de commission.`,
-        type: 'success',
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      
-      // Ajouter à l'historique des commissions
-      await db.collection('users').doc(referrerId).collection('commissions').add({
-        referredUserId: referredUserId,
-        referredUserEmail: referredUserEmail,
-        gameName: gameName,
-        amount: amount,
-        commission: commission,
-        date: admin.firestore.FieldValue.serverTimestamp(),
-        status: 'paid'
-      });
-      
-      console.log(`💰 Commission de ${commission}Fr attribuée à ${referrerData.email}`);
-    }
-  } catch (error) {
-    console.error("Erreur gestion commission:", error);
-  }
+// ===============================
+// COMMISSION PARRAINAGE
+// ===============================
+async function handleReferralCommission(referralCode, uid, email, game, amount) {
+  const q = await db.collection("users")
+    .where("referralCode", "==", referralCode)
+    .limit(1)
+    .get();
+
+  if (q.empty) return;
+
+  const ref = q.docs[0];
+  const commission = amount * 0.3;
+
+  await db.collection("users").doc(ref.id).update({
+    totalEarnings: admin.firestore.FieldValue.increment(commission),
+    availableEarnings: admin.firestore.FieldValue.increment(commission),
+    totalReferrals: admin.firestore.FieldValue.increment(1)
+  });
+
+  await db.collection("notifications").add({
+    userId: ref.id,
+    title: "Nouvelle commission 🎉",
+    message: `Votre filleul ${email} a acheté ${game}. Gain : ${commission} Fr`,
+    read: false,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
 }
 
-// 3. Route pour synchroniser les achats (appelée par le frontend)
-app.post("/sync-purchases", async (req, res) => {
-  try {
-    const { userId } = req.body;
-    
-    if (!userId) {
-      return res.status(400).json({
-        status: false,
-        message: "UID utilisateur requis"
-      });
-    }
-    
-    // Récupérer tous les achats de l'utilisateur
-    const purchasesSnapshot = await db.collection('users').doc(userId)
-      .collection('purchases')
-      .where('status', '==', 'active')
-      .orderBy('purchaseDate', 'desc')
-      .get();
-    
-    const purchases = [];
-    purchasesSnapshot.forEach(doc => {
-      const data = doc.data();
-      // Convertir les timestamps Firebase en strings ISO
-      purchases.push({
-        id: doc.id,
-        ...data,
-        purchaseDate: data.purchaseDate?.toDate ? data.purchaseDate.toDate().toISOString() : data.purchaseDate,
-        expirationDate: data.expirationDate?.toDate ? data.expirationDate.toDate().toISOString() : data.expirationDate,
-        createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt
-      });
+// ===============================
+// WEBHOOK PAYSTACK
+// ===============================
+app.post("/webhook/paystack", async (req, res) => {
+  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest("hex");
+
+  if (hash !== req.headers["x-paystack-signature"]) {
+    return res.status(400).send("Signature invalide");
+  }
+
+  if (req.body.event === "charge.success") {
+    const d = req.body.data;
+    const m = d.metadata;
+
+    await recordPurchaseInFirebase(
+      m.userId,
+      m.gameId,
+      m.gameName,
+      m.plan,
+      m.amount,
+      d.reference,
+      d.customer.email
+    );
+  }
+
+  res.sendStatus(200);
+});
+
+// ===============================
+// LANCEMENT SERVEUR
+// ===============================
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 GameHub backend lancé sur le port ${PORT}`);
+});      });
     });
     
     res.json({
