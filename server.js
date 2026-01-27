@@ -1,4 +1,4 @@
-// server.js — BACKEND GAMEHUB FINAL (FIX SYNTAXE + FIREBASE + PAYSTACK)
+// server.js — BACKEND GAMEHUB FINAL (RENDER + FIREBASE FIX)
 
 import express from "express";
 import fetch from "node-fetch";
@@ -22,21 +22,18 @@ app.use(cors({
 }));
 
 // ===============================
-// FIREBASE ADMIN (FIX RENDER PEM)
+// FIREBASE ADMIN (RENDER OFFICIAL)
 // ===============================
-if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-  throw new Error("FIREBASE_SERVICE_ACCOUNT manquant");
-}
-
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
-
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+  })
 });
 
 const db = admin.firestore();
-console.log("🔥 Firebase Admin OK");
+console.log("🔥 Firebase Admin connecté");
 
 // ===============================
 // PAYSTACK
@@ -182,7 +179,7 @@ async function recordPurchase(userId, gameId, gameName, plan, price, ref, email)
 }
 
 // ===============================
-// PAYSTACK WEBHOOK (FIX ACCOLADES)
+// PAYSTACK WEBHOOK
 // ===============================
 app.post("/webhook/paystack", (req, res) => {
   const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY)
